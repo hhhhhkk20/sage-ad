@@ -1,0 +1,90 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Environment variables
+.env
+.env.local
+
+# API Keys (important!)
+*.key
+*_key.txt
+api_keys.json
+
+# Data files (usually too large for git)
+data/ELSA/*.csv
+data/HRS/*.csv
+data/SHARE/*.csv
+data/ELSA/*.dta
+data/HRS/*.dta
+data/SHARE/*.dta
+*.pkl
+*.pickle
+
+# Keep the data directories but not their contents
+!data/ELSA/.gitkeep
+!data/HRS/.gitkeep
+!data/SHARE/.gitkeep
+
+# Results and outputs
+results/*.json
+results/*.csv
+cache/*.pkl
+cache/*.pickle
+logs/*.log
+
+# Keep the output directories
+!results/.gitkeep
+!cache/.gitkeep
+!logs/.gitkeep
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Model checkpoints and weights
+*.bin
+*.pt
+*.pth
+models/
+
+# Temporary files
+*.tmp
+*.bak
+sage_ad_framework_structure.txt

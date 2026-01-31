@@ -72,11 +72,4 @@ sage-ad/
 
 MIT License
 
-## Contact
 
-Email: 3139490837@qq.com
-GitHub: https://github.com/hhhhhkk20/sage-ad
-
----
-
-**Version**: 1.0.0

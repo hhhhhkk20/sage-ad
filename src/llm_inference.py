@@ -1,13 +1,4 @@
-"""
-SAGE-AD: LLM Inference Strategies Module
-=========================================
-This module implements three inference strategies for AD prediction:
-1. Zero-shot prompting
-2. Few-shot prompting
-3. Chain-of-thought (CoT) reasoning
-
-Based on the SAGE-AD framework described in the paper.
-"""
+"""LLM inference strategies for AD prediction."""
 
 import json
 from typing import Dict, List, Optional, Tuple
@@ -16,7 +7,6 @@ from enum import Enum
 
 
 class InferenceStrategy(Enum):
-    """Enumeration of available inference strategies."""
     ZERO_SHOT = "zero_shot"
     FEW_SHOT = "few_shot"
     CHAIN_OF_THOUGHT = "cot"
@@ -24,18 +14,6 @@ class InferenceStrategy(Enum):
 
 @dataclass
 class TemporalSymptomProfile:
-    """
-    Represents a participant's longitudinal health profile.
-
-    Attributes:
-        participant_id: Unique identifier
-        age_at_assessments: List of ages at each assessment wave
-        cognitive_features: Time-stamped cognitive assessments
-        functional_features: Time-stamped functional status
-        physiological_features: Time-stamped physiological indicators
-        neuropsychiatric_features: Time-stamped neuropsychiatric symptoms
-        demographics: Demographic information (age, sex, education)
-    """
     participant_id: str
     age_at_assessments: List[int]
     cognitive_features: List[Dict[str, any]]

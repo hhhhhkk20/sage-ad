@@ -368,29 +368,6 @@ class SAGEADBenchmark:
         for domain, ratio in dominance_ratios.items():
             self.logger.log(f"  {domain}: {ratio:.1f}%")
 
-    def generate_report(self):
-        """
-        Generate comprehensive benchmark report.
-        """
-        self.logger.log(f"\n{'='*80}")
-        self.logger.log("Generating Comprehensive Report")
-        self.logger.log(f"{'='*80}\n")
-
-        # Save all results
-        output_path = self.results_manager.save_results(
-            results=self.all_results,
-            output_dir=self.config.get("output_dir", "./results"),
-            experiment_name=self.config.get("experiment_name", "sage_ad_benchmark")
-        )
-
-        self.logger.log(f"Complete results saved to {output_path}")
-
-        # Generate summary statistics
-        self.logger.log("\n=== BENCHMARK SUMMARY ===")
-        self.logger.log(f"Models evaluated: {len(self.config['models'])}")
-        self.logger.log(f"Cohorts: {', '.join(self.config.get('cohorts', []))}")
-        self.logger.log(f"Strategies: {', '.join([s.value for s in InferenceStrategy])}")
-
     def run_complete_benchmark(self):
         """
         Execute complete SAGE-AD benchmark pipeline.
@@ -422,9 +399,6 @@ class SAGEADBenchmark:
             if self.config.get("run_interpretability", True):
                 best_model = self.config["models"][0]  # Analyze best model
                 self.run_interpretability_analysis(best_model, profiles, labels)
-
-            # 6. Generate final report
-            self.generate_report()
 
             self.logger.log("\n" + "="*80)
             self.logger.log("BENCHMARK COMPLETED SUCCESSFULLY")

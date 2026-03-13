@@ -230,7 +230,10 @@ class CohortProcessor:
         Returns:
             List of TemporalSymptomProfile objects
         """
-        from .llm_inference import TemporalSymptomProfile
+        try:
+            from .llm_inference import TemporalSymptomProfile
+        except ImportError:
+            from llm_inference import TemporalSymptomProfile
 
         profiles = []
 

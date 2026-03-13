@@ -21,7 +21,10 @@ import time
 from typing import Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .llm_inference import LLMInference
+try:
+    from .llm_inference import LLMInference
+except ImportError:
+    from llm_inference import LLMInference  # flat import when src/ is on sys.path
 
 
 # ---------------------------------------------------------------------------

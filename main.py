@@ -7,7 +7,6 @@ This script orchestrates the complete SAGE-AD benchmark evaluation pipeline:
 3. Compute performance metrics and confidence intervals
 4. Perform cross-cohort generalization analysis
 5. Conduct interpretability analysis
-6. Generate comprehensive reports
 
 Usage:
     python main.py --config configs/experiment_config.json
@@ -18,7 +17,6 @@ import os
 import sys
 from typing import List, Dict
 
-# Add src directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
 from llm_inference import LLMInference, BatchInference, InferenceStrategy, TemporalSymptomProfile
@@ -50,16 +48,8 @@ class SAGEADBenchmark:
     """
 
     def __init__(self, config_path: str):
-        """
-        Initialize benchmark with configuration.
-
-        Args:
-            config_path: Path to configuration JSON file
-        """
-        # Load configuration
         self.config = ConfigManager.load_config(config_path)
 
-        # Initialize logger
         self.logger = Logger(
             log_dir=self.config.get("log_dir", "./logs"),
             experiment_name=self.config.get("experiment_name", "sage_ad_benchmark")
@@ -68,10 +58,8 @@ class SAGEADBenchmark:
         self.logger.log("Initializing SAGE-AD Benchmark Framework")
         self.logger.log(f"Configuration loaded from {config_path}")
 
-        # Initialize results manager
         self.results_manager = ResultsManager()
 
-        # Storage for results
         self.all_results = {
             "models": {},
             "strategies": {},
@@ -81,20 +69,10 @@ class SAGEADBenchmark:
         }
 
     def load_cohort_data(self, cohort_name: str) -> tuple:
-        """
-        Load and preprocess cohort data.
-
-        Args:
-            cohort_name: Name of cohort (ELSA, HRS, SHARE)
-
-        Returns:
-            Tuple of (profiles, labels)
-        """
         self.logger.log(f"Loading {cohort_name} cohort data...")
 
         data_loader = DataLoader()
 
-        # Load appropriate cohort
         if cohort_name == "ELSA":
             df = data_loader.load_elsa_data(self.config["cohort_data_paths"]["ELSA"])
         elif cohort_name == "HRS":
@@ -104,17 +82,11 @@ class SAGEADBenchmark:
         else:
             raise ValueError(f"Unknown cohort: {cohort_name}")
 
-        # Process cohort
         processor = CohortProcessor()
         cases, controls = processor.identify_cases_and_controls(df)
 
-        # Combine cases and controls
         combined_df = pd.concat([cases, controls])
-
-        # Create temporal profiles
         profiles = processor.create_temporal_profiles(combined_df)
-
-        # Extract labels
         labels = combined_df["ad_diagnosis"].tolist()
 
         self.logger.log(f"Loaded {len(profiles)} profiles from {cohort_name}")
@@ -131,28 +103,13 @@ class SAGEADBenchmark:
         strategy: InferenceStrategy,
         prediction_horizon: int
     ) -> Dict:
-        """
-        Evaluate a single model with specific strategy.
-
-        Args:
-            model_name: Name of LLM model
-            profiles: List of participant profiles
-            labels: Ground truth labels
-            strategy: Inference strategy
-            prediction_horizon: Years before diagnosis
-
-        Returns:
-            Dictionary with predictions and metrics
-        """
         self.logger.log(
             f"Evaluating {model_name} with {strategy.value} strategy "
             f"(horizon: {prediction_horizon} years)"
         )
 
-        # Initialize batch inference
         batch_inference = BatchInference(model_name)
 
-        # Run inference
         results = batch_inference.evaluate_cohort(
             profiles=profiles,
             true_labels=labels,
@@ -160,14 +117,12 @@ class SAGEADBenchmark:
             prediction_horizon=prediction_horizon
         )
 
-        # Compute metrics
         evaluator = PerformanceEvaluator()
         metrics = evaluator.compute_metrics(
             y_true=results["true_labels"],
             y_pred=results["predictions"]
         )
 
-        # Compute bootstrap confidence intervals
         f1_ci = evaluator.bootstrap_ci(
             y_true=results["true_labels"],
             y_pred=results["predictions"],
@@ -175,7 +130,6 @@ class SAGEADBenchmark:
             n_iterations=self.config.get("bootstrap_iterations", 5000)
         )
 
-        # Store results
         result_dict = {
             "model": model_name,
             "strategy": strategy.value,
@@ -196,14 +150,6 @@ class SAGEADBenchmark:
         profiles: List[TemporalSymptomProfile],
         labels: List[bool]
     ):
-        """
-        Compare inference strategies across all models.
-
-        Args:
-            cohort_name: Name of cohort
-            profiles: List of profiles
-            labels: Ground truth labels
-        """
         self.logger.log(f"\n{'='*80}")
         self.logger.log(f"Strategy Comparison Analysis - {cohort_name}")
         self.logger.log(f"{'='*80}\n")
@@ -217,14 +163,11 @@ class SAGEADBenchmark:
                     profiles=profiles,
                     labels=labels,
                     strategy=strategy,
-                    prediction_horizon=1  # Use 1-year horizon for comparison
+                    prediction_horizon=1
                 )
-
                 strategy_results[strategy.value].append(result["metrics"]["f1_score"])
 
-        # Perform statistical comparison
         strategy_comparison = StrategyComparison.compare_strategies(strategy_results)
-
         self.all_results["strategies"][cohort_name] = strategy_comparison
         self.logger.log(f"Strategy comparison completed for {cohort_name}")
 
@@ -234,14 +177,6 @@ class SAGEADBenchmark:
         profiles: List[TemporalSymptomProfile],
         labels: List[bool]
     ):
-        """
-        Analyze temporal decay across prediction horizons.
-
-        Args:
-            model_name: Model to analyze
-            profiles: List of profiles
-            labels: Ground truth labels
-        """
         self.logger.log(f"\n{'='*80}")
         self.logger.log(f"Temporal Decay Analysis - {model_name}")
         self.logger.log(f"{'='*80}\n")
@@ -262,16 +197,11 @@ class SAGEADBenchmark:
             metrics_obj = ClassificationMetrics(**result["metrics"])
             horizon_metrics[horizon] = metrics_obj
 
-        # Compute temporal decay
         temporal_decay = TemporalAnalysis.compute_temporal_decay(horizon_metrics)
-
         self.all_results["temporal"][model_name] = temporal_decay
         self.logger.log(f"Temporal decay: {temporal_decay['relative_decay_percent']:.1f}%")
 
     def run_cross_cohort_analysis(self):
-        """
-        Analyze cross-cohort generalization.
-        """
         self.logger.log(f"\n{'='*80}")
         self.logger.log("Cross-Cohort Generalization Analysis")
         self.logger.log(f"{'='*80}\n")
@@ -279,12 +209,10 @@ class SAGEADBenchmark:
         cohorts = self.config.get("cohorts", ["ELSA", "HRS", "SHARE"])
         cohort_data = {}
 
-        # Load all cohorts
         for cohort_name in cohorts:
             profiles, labels = self.load_cohort_data(cohort_name)
             cohort_data[cohort_name] = (profiles, labels)
 
-        # Evaluate each model on all cohorts
         for model_name in self.config["models"]:
             cohort_metrics = {}
 
@@ -301,7 +229,6 @@ class SAGEADBenchmark:
                 metrics_obj = ClassificationMetrics(**result["metrics"])
                 cohort_metrics[cohort_name] = metrics_obj
 
-            # Compute generalization gap
             gen_gap = CrossCohortAnalysis.compute_generalization_gap(cohort_metrics)
 
             self.all_results["cohorts"][model_name] = {
@@ -320,25 +247,13 @@ class SAGEADBenchmark:
         profiles: List[TemporalSymptomProfile],
         labels: List[bool]
     ):
-        """
-        Conduct interpretability analysis through ablation.
-
-        Args:
-            model_name: Model to analyze
-            profiles: Sample of profiles for ablation
-            labels: Ground truth labels
-        """
         self.logger.log(f"\n{'='*80}")
         self.logger.log(f"Interpretability Analysis - {model_name}")
         self.logger.log(f"{'='*80}\n")
 
-        # Initialize inference engine
         inference_engine = LLMInference(model_name)
-
-        # Initialize ablation analyzer
         ablation_analyzer = FeatureDomainAblation(inference_engine)
 
-        # Run ablation experiment (use subset for efficiency)
         sample_size = min(100, len(profiles))
         sample_indices = np.random.choice(len(profiles), sample_size, replace=False)
         sample_profiles = [profiles[i] for i in sample_indices]
@@ -353,10 +268,7 @@ class SAGEADBenchmark:
             strategy=InferenceStrategy.FEW_SHOT
         )
 
-        # Compute dominance ratios
         dominance_ratios = DominanceAnalysis.compute_dominance_ratios(ablation_results)
-
-        # Compute interaction matrix
         interaction_matrix = InteractionAnalysis.compute_interaction_matrix(ablation_results)
 
         self.all_results["interpretability"][model_name] = {
@@ -369,36 +281,26 @@ class SAGEADBenchmark:
             self.logger.log(f"  {domain}: {ratio:.1f}%")
 
     def run_complete_benchmark(self):
-        """
-        Execute complete SAGE-AD benchmark pipeline.
-        """
         self.logger.log("\n" + "="*80)
         self.logger.log("STARTING SAGE-AD BENCHMARK EVALUATION")
         self.logger.log("="*80 + "\n")
 
         try:
-            # 1. Load primary cohort data
             primary_cohort = self.config.get("primary_cohort", "HRS")
             profiles, labels = self.load_cohort_data(primary_cohort)
 
-            # 2. Strategy comparison
             if self.config.get("run_strategy_comparison", True):
                 self.run_strategy_comparison(primary_cohort, profiles, labels)
 
-            # 3. Temporal analysis for top models
             if self.config.get("run_temporal_analysis", True):
-                top_models = self.config["models"][:3]  # Analyze top 3 models
-                for model in top_models:
+                for model in self.config["models"][:3]:
                     self.run_temporal_analysis(model, profiles, labels)
 
-            # 4. Cross-cohort generalization
             if self.config.get("run_cross_cohort", True):
                 self.run_cross_cohort_analysis()
 
-            # 5. Interpretability analysis
             if self.config.get("run_interpretability", True):
-                best_model = self.config["models"][0]  # Analyze best model
-                self.run_interpretability_analysis(best_model, profiles, labels)
+                self.run_interpretability_analysis(self.config["models"][0], profiles, labels)
 
             self.logger.log("\n" + "="*80)
             self.logger.log("BENCHMARK COMPLETED SUCCESSFULLY")
@@ -410,9 +312,6 @@ class SAGEADBenchmark:
 
 
 def main():
-    """
-    Main entry point for SAGE-AD benchmark.
-    """
     parser = argparse.ArgumentParser(
         description="SAGE-AD: Benchmark framework for LLM-based AD prediction"
     )
@@ -432,7 +331,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Create default config if requested
     if args.create_config:
         config_manager = ConfigManager()
         default_config = config_manager.create_default_config()
@@ -440,13 +338,11 @@ def main():
         print("Default configuration created at configs/default_config.json")
         return
 
-    # Check if config exists
     if not os.path.exists(args.config):
         print(f"Configuration file not found: {args.config}")
         print("Run with --create-config to generate a default configuration")
         return
 
-    # Run benchmark
     benchmark = SAGEADBenchmark(config_path=args.config)
     benchmark.run_complete_benchmark()
 

@@ -1,6 +1,6 @@
 """SAGE-AD Framework"""
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from .llm_inference import (
     LLMInference,
@@ -9,6 +9,8 @@ from .llm_inference import (
     TemporalSymptomProfile,
     PromptTemplate
 )
+
+from .multi_agent import MultiSpecialistPanel
 
 from .evaluation_metrics import (
     PerformanceEvaluator,

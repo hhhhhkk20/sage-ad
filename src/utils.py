@@ -22,25 +22,72 @@ class DataLoader:
     Load and preprocess longitudinal survey data from different cohorts.
     """
 
+    # ------------------------------------------------------------------
+    # Cohort-specific variable mappings
+    # ------------------------------------------------------------------
+
+    # ELSA cognitive variables (waves 1-9)
+    ELSA_VARIABLE_MAP = {
+        "idauniqc":   "participant_id",
+        "indager":    "age",
+        "indsex":     "sex",          # 1=male, 2=female
+        "cfmem":      "word_recall_immediate",
+        "cfmemdr":    "word_recall_delayed",
+        "cfori":      "orientation",
+        "cflisen":    "serial_7s",
+        "headldr":    "ADL_impairment",
+        "headlss":    "IADL_impairment",
+        "bmival":     "BMI",
+        "mmgsd1":     "grip_strength",
+        "scghq1":     "depression_score",
+    }
+
+    # HRS cognitive variables
+    HRS_VARIABLE_MAP = {
+        "hhidpn":     "participant_id",
+        "age":        "age",
+        "ragender":   "sex",           # 1=male, 2=female
+        "r_imrc":     "word_recall_immediate",
+        "r_dlrc":     "word_recall_delayed",
+        "r_orient":   "orientation",
+        "r_ser7":     "serial_7s",
+        "r_adla":     "ADL_impairment",
+        "r_iadlza":   "IADL_impairment",
+        "r_bmi":      "BMI",
+        "r_gripsum":  "grip_strength",
+        "r_cesd":     "depression_score",
+    }
+
+    # SHARE cognitive variables
+    SHARE_VARIABLE_MAP = {
+        "mergeid":    "participant_id",
+        "age":        "age",
+        "gender":     "sex",
+        "cf_recall":  "word_recall_immediate",
+        "cf_delayed": "word_recall_delayed",
+        "cf_orient":  "orientation",
+        "adlA":       "ADL_impairment",
+        "iadlA":      "IADL_impairment",
+        "bmi":        "BMI",
+        "maxgrip":    "grip_strength",
+        "euro_d":     "depression_score",
+    }
+
     @staticmethod
     def load_elsa_data(file_path: str) -> pd.DataFrame:
         """
         Load ELSA (English Longitudinal Study of Ageing) data.
 
         Args:
-            file_path: Path to ELSA data file
+            file_path: Path to ELSA CSV or Stata file
 
         Returns:
-            Pandas DataFrame with harmonized ELSA data
+            Harmonized DataFrame with common variable names
         """
-        # Pseudocode for loading ELSA data
-        # In practice, this would involve reading CSV/STATA files and harmonizing variables
-        # df = pd.read_stata(file_path) or pd.read_csv(file_path)
-        # return DataLoader._harmonize_elsa(df)
-
-        print(f"Loading ELSA data from {file_path}...")
-        # Placeholder
-        return pd.DataFrame()
+        print(f"Loading ELSA data from {file_path} ...")
+        ext = os.path.splitext(file_path)[-1].lower()
+        df = pd.read_stata(file_path) if ext == ".dta" else pd.read_csv(file_path)
+        return DataLoader._rename_and_clean(df, DataLoader.ELSA_VARIABLE_MAP, sex_recode={1: "Male", 2: "Female"})
 
     @staticmethod
     def load_hrs_data(file_path: str) -> pd.DataFrame:
@@ -48,14 +95,15 @@ class DataLoader:
         Load HRS (Health and Retirement Study) data.
 
         Args:
-            file_path: Path to HRS data file
+            file_path: Path to HRS CSV or Stata file
 
         Returns:
-            Pandas DataFrame with harmonized HRS data
+            Harmonized DataFrame with common variable names
         """
-        print(f"Loading HRS data from {file_path}...")
-        # Placeholder
-        return pd.DataFrame()
+        print(f"Loading HRS data from {file_path} ...")
+        ext = os.path.splitext(file_path)[-1].lower()
+        df = pd.read_stata(file_path) if ext == ".dta" else pd.read_csv(file_path)
+        return DataLoader._rename_and_clean(df, DataLoader.HRS_VARIABLE_MAP, sex_recode={1: "Male", 2: "Female"})
 
     @staticmethod
     def load_share_data(file_path: str) -> pd.DataFrame:
@@ -63,14 +111,38 @@ class DataLoader:
         Load SHARE (Survey of Health, Ageing and Retirement in Europe) data.
 
         Args:
-            file_path: Path to SHARE data file
+            file_path: Path to SHARE CSV or Stata file
 
         Returns:
-            Pandas DataFrame with harmonized SHARE data
+            Harmonized DataFrame with common variable names
         """
-        print(f"Loading SHARE data from {file_path}...")
-        # Placeholder
-        return pd.DataFrame()
+        print(f"Loading SHARE data from {file_path} ...")
+        ext = os.path.splitext(file_path)[-1].lower()
+        df = pd.read_stata(file_path) if ext == ".dta" else pd.read_csv(file_path)
+        return DataLoader._rename_and_clean(df, DataLoader.SHARE_VARIABLE_MAP, sex_recode={1: "Male", 2: "Female"})
+
+    @staticmethod
+    def _rename_and_clean(
+        df: pd.DataFrame,
+        variable_map: Dict[str, str],
+        sex_recode: Optional[Dict] = None,
+    ) -> pd.DataFrame:
+        """Rename columns to harmonised names and apply basic cleaning."""
+        # Keep only mapped columns that exist in the dataframe
+        existing = {k: v for k, v in variable_map.items() if k in df.columns}
+        df = df[list(existing.keys())].rename(columns=existing)
+        if sex_recode and "sex" in df.columns:
+            df["sex"] = df["sex"].map(sex_recode).fillna("Unknown")
+        # Coerce numeric columns
+        numeric_cols = [
+            "age", "word_recall_immediate", "word_recall_delayed",
+            "orientation", "serial_7s", "ADL_impairment", "IADL_impairment",
+            "BMI", "grip_strength", "depression_score",
+        ]
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        return df
 
     @staticmethod
     def harmonize_variables(
@@ -158,7 +230,7 @@ class CohortProcessor:
         Returns:
             List of TemporalSymptomProfile objects
         """
-        from llm_inference import TemporalSymptomProfile
+        from .llm_inference import TemporalSymptomProfile
 
         profiles = []
 

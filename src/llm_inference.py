@@ -1,9 +1,21 @@
-"""LLM inference strategies for AD prediction."""
+"""
+SAGE-AD: LLM Inference Strategies for AD Prediction
+=====================================================
+Implements multi-strategy LLM inference for Alzheimer's disease risk prediction
+from longitudinal survey profiles (zero-shot, few-shot, chain-of-thought).
 
+Supports OpenAI-compatible APIs (GPT, Qwen, DeepSeek, SiliconFlow),
+Google Gemini, and Anthropic Claude.
+"""
+
+import os
+import re
+import time
 import json
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 class InferenceStrategy(Enum):
@@ -14,6 +26,7 @@ class InferenceStrategy(Enum):
 
 @dataclass
 class TemporalSymptomProfile:
+    """Longitudinal health profile for a single survey participant."""
     participant_id: str
     age_at_assessments: List[int]
     cognitive_features: List[Dict[str, any]]
@@ -23,337 +36,410 @@ class TemporalSymptomProfile:
     demographics: Dict[str, any]
 
     def to_narrative_text(self) -> str:
-        """
-        Convert structured profile to natural language narrative.
-
-        Returns:
-            Natural language description of temporal symptom profile
-        """
+        """Convert structured profile to natural language narrative."""
         narrative = f"Patient ID: {self.participant_id}\n"
         narrative += f"Demographics: {self._format_demographics()}\n\n"
         narrative += "Longitudinal Health Profile:\n"
-
         for idx, age in enumerate(self.age_at_assessments):
             narrative += f"\n--- Assessment at age {age} ---\n"
             narrative += f"Cognitive: {self._format_features(self.cognitive_features[idx])}\n"
             narrative += f"Functional: {self._format_features(self.functional_features[idx])}\n"
             narrative += f"Physiological: {self._format_features(self.physiological_features[idx])}\n"
             narrative += f"Neuropsychiatric: {self._format_features(self.neuropsychiatric_features[idx])}\n"
-
         return narrative
 
     def _format_demographics(self) -> str:
-        """Format demographic information."""
         return ", ".join([f"{k}: {v}" for k, v in self.demographics.items()])
 
     def _format_features(self, features: Dict[str, any]) -> str:
-        """Format feature dictionary to readable text."""
         return ", ".join([f"{k}={v}" for k, v in features.items()])
 
 
 class PromptTemplate:
     """
-    Manages prompt templates for different inference strategies.
-    Based on Extended Data Fig. 2 in the paper.
+    Prompt templates for different inference strategies.
+    Based on Extended Data Fig. 2 in the SAGE-AD paper.
     """
 
-    @staticmethod
-    def get_system_role() -> str:
-        """Define the system role for the LLM."""
-        return """You are a specialist in geriatric neurology with expertise in
-Alzheimer's disease risk assessment. Your task is to analyze longitudinal
-health profiles from community-based surveys and predict the likelihood of
-AD onset."""
+    SYSTEM_ROLE = (
+        "You are a highly qualified specialist in Alzheimer's disease, "
+        "with extensive clinical and research experience. "
+        "Your task is to analyze longitudinal health profiles from community-based "
+        "surveys and predict the likelihood of AD onset."
+    )
 
     @staticmethod
     def get_task_specification(prediction_horizon: int) -> str:
-        """
-        Define the task specification.
-
-        Args:
-            prediction_horizon: Years before diagnosis (1-4)
-        """
-        return f"""Based on the provided longitudinal health profile, predict whether
-this participant will develop Alzheimer's disease within {prediction_horizon} year(s).
-Consider cognitive function, functional status, physiological health, and
-neuropsychiatric symptoms across all available time points."""
+        return (
+            f"Based on the provided longitudinal health profile, predict whether "
+            f"this participant will develop Alzheimer's disease within "
+            f"{prediction_horizon} year(s). "
+            "Consider cognitive function, functional status, physiological health, "
+            "and neuropsychiatric symptoms across all available time points."
+        )
 
     @staticmethod
     def get_output_constraints() -> str:
-        """Define output format constraints."""
-        return """Provide your prediction in the following format:
-Prediction: [Yes/No]
-Confidence: [Low/Medium/High]
-Brief Justification: [1-2 sentences]"""
+        return (
+            "Provide your prediction in the following format:\n"
+            "Prediction: [Yes/No]\n"
+            "Confidence: [Low/Medium/High]\n"
+            "Brief Justification: [1-2 sentences]"
+        )
 
     @staticmethod
-    def get_cot_reasoning_instructions() -> str:
-        """Get chain-of-thought reasoning instructions."""
-        return """Before making your final prediction, analyze the following:
-1. Identify concerning patterns within each clinical dimension (cognitive, functional, physiological, neuropsychiatric)
-2. Integrate findings across dimensions
-3. Consider temporal trajectories and progressive decline patterns
-4. Synthesize observations into a diagnostic conclusion
+    def get_zero_shot_output_constraints() -> str:
+        """Strict zero-shot output — Yes/No only."""
+        return (
+            "Additional Instructions:\n"
+            "• Respond ONLY with either 'Yes' or 'No'.\n"
+            "• Do not include any explanations or additional text."
+        )
 
-Please show your step-by-step reasoning process before providing the final prediction."""
+    @staticmethod
+    def get_cot_instructions() -> str:
+        return (
+            "Before making your final prediction, reason step by step:\n"
+            "1. Identify concerning patterns within each clinical dimension "
+            "(cognitive, functional, physiological, neuropsychiatric).\n"
+            "2. Integrate findings across dimensions.\n"
+            "3. Consider temporal trajectories and progressive decline patterns.\n"
+            "4. Synthesize observations into a diagnostic conclusion.\n\n"
+            "Show your step-by-step reasoning, then provide the final prediction "
+            "in the format:\nPrediction: [Yes/No]"
+        )
+
+    # Built-in few-shot example pairs (drawn from ELSA balanced profiles)
+    FEW_SHOT_EXAMPLES = [
+        {
+            "profile": (
+                "Demographics: Age: 68, Sex: Female, Education: 12 years\n\n"
+                "--- Assessment at age 64 ---\n"
+                "Cognitive: word_recall_immediate=9, word_recall_delayed=7, orientation=5\n"
+                "Functional: ADL_impairment=0, IADL_impairment=0\n"
+                "Physiological: grip_strength=24, gait_speed=1.1\n"
+                "Neuropsychiatric: depression_score=2, anxiety=low\n\n"
+                "--- Assessment at age 66 ---\n"
+                "Cognitive: word_recall_immediate=6, word_recall_delayed=4, orientation=4\n"
+                "Functional: ADL_impairment=0, IADL_impairment=1\n"
+                "Physiological: grip_strength=22, gait_speed=0.95\n"
+                "Neuropsychiatric: depression_score=4, anxiety=moderate\n\n"
+                "--- Assessment at age 68 ---\n"
+                "Cognitive: word_recall_immediate=4, word_recall_delayed=2, orientation=3\n"
+                "Functional: ADL_impairment=1, IADL_impairment=3\n"
+                "Physiological: grip_strength=19, gait_speed=0.8\n"
+                "Neuropsychiatric: depression_score=6, anxiety=moderate"
+            ),
+            "label": "Yes",
+            "justification": (
+                "Progressive decline in memory recall, increasing functional impairment, "
+                "and worsening neuropsychiatric symptoms indicate high AD risk."
+            ),
+        },
+        {
+            "profile": (
+                "Demographics: Age: 72, Sex: Male, Education: 16 years\n\n"
+                "--- Assessment at age 68 ---\n"
+                "Cognitive: word_recall_immediate=8, word_recall_delayed=6, orientation=5\n"
+                "Functional: ADL_impairment=0, IADL_impairment=0\n"
+                "Physiological: grip_strength=34, gait_speed=1.3\n"
+                "Neuropsychiatric: depression_score=1, anxiety=low\n\n"
+                "--- Assessment at age 70 ---\n"
+                "Cognitive: word_recall_immediate=8, word_recall_delayed=7, orientation=5\n"
+                "Functional: ADL_impairment=0, IADL_impairment=0\n"
+                "Physiological: grip_strength=32, gait_speed=1.25\n"
+                "Neuropsychiatric: depression_score=1, anxiety=low\n\n"
+                "--- Assessment at age 72 ---\n"
+                "Cognitive: word_recall_immediate=9, word_recall_delayed=7, orientation=5\n"
+                "Functional: ADL_impairment=0, IADL_impairment=0\n"
+                "Physiological: grip_strength=31, gait_speed=1.2\n"
+                "Neuropsychiatric: depression_score=2, anxiety=low"
+            ),
+            "label": "No",
+            "justification": (
+                "Stable or slightly improving cognitive performance with no functional "
+                "decline suggests low AD risk."
+            ),
+        },
+    ]
 
 
 class LLMInference:
     """
-    Main class for LLM-based AD prediction with multiple inference strategies.
+    LLM inference engine supporting multiple model backends and strategies.
+
+    Supported backends (auto-detected from model_name):
+      - OpenAI  (gpt-*, o1-*, o3-*)
+      - Anthropic Claude  (claude-*)
+      - Google Gemini  (gemini-*)
+      - Qwen / DashScope  (qwen-*, qwen3-*)
+      - DeepSeek  (deepseek-*)
+      - SiliconFlow / any OpenAI-compatible  (pass base_url explicitly)
     """
 
-    def __init__(self, model_name: str, model_api_endpoint: Optional[str] = None):
-        """
-        Initialize LLM inference engine.
+    _API_KEY_ENV = {
+        "openai":     "OPENAI_API_KEY",
+        "anthropic":  "ANTHROPIC_API_KEY",
+        "google":     "GOOGLE_API_KEY",
+        "dashscope":  "DASHSCOPE_API_KEY",
+        "siliconflow": "SILICONFLOW_API_KEY",
+    }
 
-        Args:
-            model_name: Name of the LLM model (e.g., 'gpt-4o', 'gemini-2.5-flash')
-            model_api_endpoint: API endpoint for proprietary models
-        """
+    def __init__(
+        self,
+        model_name: str,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        temperature: float = 0.1,
+        max_tokens: int = 512,
+        max_retries: int = 3,
+    ):
         self.model_name = model_name
-        self.model_api_endpoint = model_api_endpoint
-        self.prompt_template = PromptTemplate()
+        self.base_url = base_url
+        self.api_key = api_key
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.max_retries = max_retries
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def predict(
         self,
         profile: TemporalSymptomProfile,
         strategy: InferenceStrategy,
         prediction_horizon: int = 1,
-        few_shot_examples: Optional[List[Tuple[TemporalSymptomProfile, bool]]] = None
+        few_shot_examples: Optional[List[Tuple[TemporalSymptomProfile, bool]]] = None,
+    ) -> Dict[str, any]:
+        """Make AD prediction from a TemporalSymptomProfile."""
+        prompt = self._build_prompt(profile, strategy, prediction_horizon, few_shot_examples)
+        raw = self._call_llm_api(prompt)
+        return self._parse_response(raw, strategy)
+
+    def predict_from_text(
+        self,
+        profile_text: str,
+        strategy: InferenceStrategy = InferenceStrategy.ZERO_SHOT,
+        prediction_horizon: int = 1,
     ) -> Dict[str, any]:
         """
-        Make AD prediction using specified inference strategy.
-
-        Args:
-            profile: Participant's temporal symptom profile
-            strategy: Inference strategy to use
-            prediction_horizon: Years before diagnosis (1-4)
-            few_shot_examples: List of (profile, label) tuples for few-shot learning
-
-        Returns:
-            Dictionary containing:
-                - prediction: bool (True = AD positive)
-                - confidence: str (Low/Medium/High)
-                - reasoning: str (explanation)
-                - raw_response: str (full LLM output)
+        Predict directly from free-text profile (.txt files as used in ELSA/HRS/SHARE).
         """
-        # Build prompt based on strategy
-        prompt = self._build_prompt(
-            profile=profile,
-            strategy=strategy,
-            prediction_horizon=prediction_horizon,
-            few_shot_examples=few_shot_examples
-        )
+        system = PromptTemplate.SYSTEM_ROLE
+        task = PromptTemplate.get_task_specification(prediction_horizon)
 
-        # Call LLM API (pseudocode - actual implementation depends on model)
-        raw_response = self._call_llm_api(prompt)
+        if strategy == InferenceStrategy.ZERO_SHOT:
+            constraints = PromptTemplate.get_zero_shot_output_constraints()
+            prompt = f"{system}\n\n{task}\n\n{constraints}\n\nPatient profile:\n{profile_text}"
 
-        # Parse response
-        parsed_result = self._parse_llm_response(raw_response)
+        elif strategy == InferenceStrategy.FEW_SHOT:
+            examples_text = self._format_builtin_examples()
+            constraints = PromptTemplate.get_zero_shot_output_constraints()
+            prompt = (
+                f"{system}\n\n{task}\n\n"
+                f"=== Demonstrative Examples ===\n{examples_text}\n\n"
+                f"{constraints}\n\nPatient profile:\n{profile_text}"
+            )
 
-        return parsed_result
+        else:  # CoT
+            cot = PromptTemplate.get_cot_instructions()
+            prompt = f"{system}\n\n{task}\n\n{cot}\n\nPatient profile:\n{profile_text}"
 
-    def _build_prompt(
-        self,
-        profile: TemporalSymptomProfile,
-        strategy: InferenceStrategy,
-        prediction_horizon: int,
-        few_shot_examples: Optional[List[Tuple[TemporalSymptomProfile, bool]]]
-    ) -> str:
-        """
-        Build complete prompt based on inference strategy.
+        raw = self._call_llm_api(prompt)
+        return self._parse_response(raw, strategy)
 
-        Args:
-            profile: Target profile to predict
-            strategy: Inference strategy
-            prediction_horizon: Years before diagnosis
-            few_shot_examples: Few-shot learning examples
+    # ------------------------------------------------------------------
+    # Prompt construction
+    # ------------------------------------------------------------------
 
-        Returns:
-            Complete prompt string
-        """
-        prompt_parts = []
+    def _build_prompt(self, profile, strategy, prediction_horizon, few_shot_examples):
+        parts = [
+            PromptTemplate.SYSTEM_ROLE,
+            PromptTemplate.get_task_specification(prediction_horizon),
+        ]
 
-        # 1. System role
-        prompt_parts.append(self.prompt_template.get_system_role())
+        if strategy == InferenceStrategy.FEW_SHOT:
+            parts.append("=== Demonstrative Examples ===")
+            if few_shot_examples:
+                for i, (ex, label) in enumerate(few_shot_examples, 1):
+                    parts.append(f"\nExample {i}:\n{ex.to_narrative_text()}")
+                    parts.append(f"Ground Truth: {'Yes (AD positive)' if label else 'No (Healthy)'}")
+            else:
+                parts.append(self._format_builtin_examples())
 
-        # 2. Task specification
-        prompt_parts.append(self.prompt_template.get_task_specification(prediction_horizon))
-
-        # 3. Few-shot examples (if applicable)
-        if strategy == InferenceStrategy.FEW_SHOT and few_shot_examples:
-            prompt_parts.append("\n=== Demonstrative Examples ===")
-            for idx, (example_profile, label) in enumerate(few_shot_examples, 1):
-                prompt_parts.append(f"\nExample {idx}:")
-                prompt_parts.append(example_profile.to_narrative_text())
-                prompt_parts.append(f"Ground Truth: {'Yes (AD positive)' if label else 'No (Healthy)'}")
-
-        # 4. Chain-of-thought instructions (if applicable)
         if strategy == InferenceStrategy.CHAIN_OF_THOUGHT:
-            prompt_parts.append(self.prompt_template.get_cot_reasoning_instructions())
+            parts.append(PromptTemplate.get_cot_instructions())
 
-        # 5. Target profile
-        prompt_parts.append("\n=== Target Patient Profile ===")
-        prompt_parts.append(profile.to_narrative_text())
+        parts.append("=== Target Patient Profile ===")
+        parts.append(profile.to_narrative_text())
+        parts.append(PromptTemplate.get_output_constraints())
 
-        # 6. Output constraints
-        prompt_parts.append(self.prompt_template.get_output_constraints())
+        return "\n\n".join(parts)
 
-        return "\n\n".join(prompt_parts)
+    def _format_builtin_examples(self) -> str:
+        lines = []
+        for i, ex in enumerate(PromptTemplate.FEW_SHOT_EXAMPLES, 1):
+            lines.append(f"Example {i}:\n{ex['profile']}")
+            lines.append(f"Prediction: {ex['label']}")
+            lines.append(f"Brief Justification: {ex['justification']}\n")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # API dispatch
+    # ------------------------------------------------------------------
 
     def _call_llm_api(self, prompt: str) -> str:
-        """
-        Call LLM API to get prediction.
+        name = self.model_name.lower()
+        if self.base_url:
+            return self._call_openai_compat(prompt, self.base_url, self._get_key("openai"))
+        if "claude" in name:
+            return self._call_claude(prompt)
+        if "gemini" in name:
+            return self._call_gemini(prompt)
+        if any(k in name for k in ("qwen", "deepseek", "baichuan", "llama", "mistral")):
+            return self._call_openai_compat(prompt, self._infer_base_url(), self._get_key("dashscope"))
+        return self._call_openai_compat(prompt, "https://api.openai.com/v1", self._get_key("openai"))
 
-        Args:
-            prompt: Complete prompt string
+    def _infer_base_url(self) -> str:
+        name = self.model_name.lower()
+        if "qwen" in name:
+            return "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        if "deepseek" in name:
+            return "https://api.deepseek.com/v1"
+        return "https://api.siliconflow.cn/v1"
 
-        Returns:
-            Raw LLM response
+    def _get_key(self, backend: str) -> str:
+        if self.api_key:
+            return self.api_key
+        env = self._API_KEY_ENV.get(backend, "OPENAI_API_KEY")
+        key = os.environ.get(env, "")
+        if not key:
+            raise EnvironmentError(
+                f"API key not found. Set {env} or pass api_key= to LLMInference."
+            )
+        return key
 
-        Note:
-            This is pseudocode. Actual implementation depends on the model:
-            - For OpenAI GPT models: use openai.ChatCompletion.create()
-            - For Google Gemini: use genai.GenerativeModel().generate_content()
-            - For Claude: use anthropic.Anthropic().messages.create()
-            - For open-source models: use transformers pipeline or HuggingFace API
-        """
-        # Pseudocode for API call
-        if "gpt" in self.model_name.lower():
-            # OpenAI API call
-            response = self._call_openai_api(prompt)
-        elif "gemini" in self.model_name.lower():
-            # Google Gemini API call
-            response = self._call_gemini_api(prompt)
-        elif "claude" in self.model_name.lower():
-            # Anthropic Claude API call
-            response = self._call_claude_api(prompt)
-        else:
-            # Open-source model call (HuggingFace)
-            response = self._call_huggingface_api(prompt)
+    def _call_openai_compat(self, prompt: str, base_url: str, api_key: str) -> str:
+        """Call any OpenAI-compatible endpoint (GPT, Qwen, DeepSeek, SiliconFlow …)."""
+        try:
+            from openai import OpenAI
+        except ImportError:
+            raise ImportError("pip install openai>=1.0.0")
 
-        return response
+        client = OpenAI(api_key=api_key, base_url=base_url)
+        for attempt in range(self.max_retries):
+            try:
+                resp = client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=self.temperature,
+                    max_tokens=self.max_tokens,
+                )
+                return resp.choices[0].message.content.strip()
+            except Exception as e:
+                print(f"  [attempt {attempt+1}] error: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)
+        return "Error"
 
-    def _call_openai_api(self, prompt: str) -> str:
-        """Call OpenAI API (GPT models)."""
-        # Pseudocode:
-        # import openai
-        # response = openai.ChatCompletion.create(
-        #     model=self.model_name,
-        #     messages=[{"role": "user", "content": prompt}],
-        #     temperature=0,  # Deterministic for reproducibility
-        #     max_tokens=512
-        # )
-        # return response.choices[0].message.content
-        return "[PLACEHOLDER: OpenAI API response]"
-
-    def _call_gemini_api(self, prompt: str) -> str:
-        """Call Google Gemini API."""
-        # Pseudocode:
-        # import google.generativeai as genai
-        # model = genai.GenerativeModel(self.model_name)
-        # response = model.generate_content(prompt)
-        # return response.text
-        return "[PLACEHOLDER: Gemini API response]"
-
-    def _call_claude_api(self, prompt: str) -> str:
+    def _call_claude(self, prompt: str) -> str:
         """Call Anthropic Claude API."""
-        # Pseudocode:
-        # import anthropic
-        # client = anthropic.Anthropic(api_key="...")
-        # message = client.messages.create(
-        #     model=self.model_name,
-        #     max_tokens=512,
-        #     messages=[{"role": "user", "content": prompt}]
-        # )
-        # return message.content[0].text
-        return "[PLACEHOLDER: Claude API response]"
+        try:
+            import anthropic
+        except ImportError:
+            raise ImportError("pip install anthropic>=0.18.0")
 
-    def _call_huggingface_api(self, prompt: str) -> str:
-        """Call HuggingFace API for open-source models."""
-        # Pseudocode:
-        # from transformers import AutoTokenizer, AutoModelForCausalLM
-        # tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        # model = AutoModelForCausalLM.from_pretrained(
-        #     self.model_name,
-        #     load_in_4bit=True,  # 4-bit quantization for efficiency
-        #     device_map="auto"
-        # )
-        # inputs = tokenizer(prompt, return_tensors="pt")
-        # outputs = model.generate(**inputs, max_new_tokens=512)
-        # response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        # return response
-        return "[PLACEHOLDER: HuggingFace API response]"
+        client = anthropic.Anthropic(api_key=self._get_key("anthropic"))
+        for attempt in range(self.max_retries):
+            try:
+                msg = client.messages.create(
+                    model=self.model_name,
+                    max_tokens=self.max_tokens,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                return msg.content[0].text.strip()
+            except Exception as e:
+                print(f"  [attempt {attempt+1}] Claude error: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)
+        return "Error"
 
-    def _parse_llm_response(self, raw_response: str) -> Dict[str, any]:
-        """
-        Parse LLM response to extract prediction, confidence, and reasoning.
+    def _call_gemini(self, prompt: str) -> str:
+        """Call Google Gemini API."""
+        try:
+            import google.generativeai as genai
+        except ImportError:
+            raise ImportError("pip install google-generativeai>=0.3.0")
 
-        Args:
-            raw_response: Raw text from LLM
+        genai.configure(api_key=self._get_key("google"))
+        model = genai.GenerativeModel(self.model_name)
+        for attempt in range(self.max_retries):
+            try:
+                resp = model.generate_content(
+                    prompt,
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=self.temperature,
+                        max_output_tokens=self.max_tokens,
+                    ),
+                )
+                return resp.text.strip()
+            except Exception as e:
+                print(f"  [attempt {attempt+1}] Gemini error: {e}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(2 ** attempt)
+        return "Error"
 
-        Returns:
-            Parsed dictionary with prediction, confidence, reasoning
-        """
-        # Initialize result
+    # ------------------------------------------------------------------
+    # Response parsing
+    # ------------------------------------------------------------------
+
+    def _parse_response(self, raw: str, strategy: InferenceStrategy) -> Dict[str, any]:
         result = {
             "prediction": None,
             "confidence": "Unknown",
             "reasoning": "",
-            "raw_response": raw_response
+            "raw_response": raw,
         }
+        if not raw or raw == "Error":
+            return result
 
-        # Parse prediction (Yes/No)
-        lower_response = raw_response.lower()
-        if "prediction:" in lower_response:
-            pred_line = [line for line in raw_response.split('\n') if 'prediction:' in line.lower()]
-            if pred_line:
-                pred_text = pred_line[0].lower()
-                # Conservative classification: ambiguity counts as positive
-                if "yes" in pred_text or "positive" in pred_text:
-                    result["prediction"] = True
-                elif "no" in pred_text or "negative" in pred_text:
-                    result["prediction"] = False
-                else:
-                    # Ambiguous or deferred -> classify as positive (screening approach)
-                    result["prediction"] = True
+        lower = raw.lower().strip()
 
-        # Parse confidence
-        if "confidence:" in lower_response:
-            conf_line = [line for line in raw_response.split('\n') if 'confidence:' in line.lower()]
-            if conf_line:
-                conf_text = conf_line[0].lower()
-                if "high" in conf_text:
-                    result["confidence"] = "High"
-                elif "medium" in conf_text:
-                    result["confidence"] = "Medium"
-                elif "low" in conf_text:
-                    result["confidence"] = "Low"
-
-        # Extract reasoning/justification
-        if "justification:" in lower_response or "reasoning:" in lower_response:
-            # Extract text after justification/reasoning marker
-            for marker in ["justification:", "reasoning:"]:
-                if marker in lower_response:
-                    idx = lower_response.find(marker)
-                    result["reasoning"] = raw_response[idx:].split('\n', 1)[1].strip()
-                    break
+        # Prediction: look for explicit "Prediction: Yes/No" line
+        m = re.search(r"prediction\s*:\s*(yes|no)", lower)
+        if m:
+            result["prediction"] = m.group(1) == "yes"
         else:
-            # If no explicit justification section, use entire response
-            result["reasoning"] = raw_response
+            if re.search(r"\byes\b", lower):
+                result["prediction"] = True
+            elif re.search(r"\bno\b", lower):
+                result["prediction"] = False
+
+        # Confidence
+        m = re.search(r"confidence\s*:\s*(low|medium|high)", lower)
+        if m:
+            result["confidence"] = m.group(1).capitalize()
+
+        # Reasoning
+        for marker in ("brief justification:", "justification:", "reasoning:"):
+            idx = lower.find(marker)
+            if idx != -1:
+                result["reasoning"] = raw[idx + len(marker):].strip().split("\n")[0].strip()
+                break
+        if not result["reasoning"] and strategy == InferenceStrategy.CHAIN_OF_THOUGHT:
+            result["reasoning"] = raw
 
         return result
 
 
 class BatchInference:
-    """
-    Batch processing for multiple participants across different strategies.
-    """
+    """Parallel batch evaluation of an LLM over a cohort of profiles."""
 
-    def __init__(self, model_name: str):
-        """Initialize batch inference engine."""
-        self.inference_engine = LLMInference(model_name)
+    def __init__(self, model_name: str, max_workers: int = 4, **engine_kwargs):
+        self.model_name = model_name
+        self.max_workers = max_workers
+        self._engine_kwargs = engine_kwargs
 
     def evaluate_cohort(
         self,
@@ -361,108 +447,99 @@ class BatchInference:
         true_labels: List[bool],
         strategy: InferenceStrategy,
         prediction_horizon: int = 1,
-        few_shot_examples: Optional[List[Tuple[TemporalSymptomProfile, bool]]] = None
+        few_shot_examples=None,
     ) -> Dict[str, any]:
-        """
-        Evaluate model performance on a cohort.
+        """Evaluate all profiles in parallel."""
 
-        Args:
-            profiles: List of participant profiles
-            true_labels: Ground truth labels (True = AD, False = Healthy)
-            strategy: Inference strategy
-            prediction_horizon: Years before diagnosis
-            few_shot_examples: Few-shot learning examples
+        def _infer(idx_profile):
+            idx, profile = idx_profile
+            engine = LLMInference(self.model_name, **self._engine_kwargs)
+            r = engine.predict(profile, strategy, prediction_horizon, few_shot_examples)
+            return idx, r
 
-        Returns:
-            Dictionary containing:
-                - predictions: List of predictions
-                - metrics: Performance metrics (computed by evaluation module)
-        """
-        predictions = []
-        confidences = []
-        reasonings = []
+        preds = [None] * len(profiles)
+        confs = [None] * len(profiles)
+        reasons = [None] * len(profiles)
 
-        print(f"Evaluating {len(profiles)} participants using {strategy.value} strategy...")
+        print(f"Evaluating {len(profiles)} profiles [{self.model_name}] "
+              f"strategy={strategy.value} horizon={prediction_horizon}y")
 
-        for idx, profile in enumerate(profiles):
-            # Make prediction
-            result = self.inference_engine.predict(
-                profile=profile,
-                strategy=strategy,
-                prediction_horizon=prediction_horizon,
-                few_shot_examples=few_shot_examples
-            )
-
-            predictions.append(result["prediction"])
-            confidences.append(result["confidence"])
-            reasonings.append(result["reasoning"])
-
-            if (idx + 1) % 100 == 0:
-                print(f"  Processed {idx + 1}/{len(profiles)} participants")
+        with ThreadPoolExecutor(max_workers=self.max_workers) as ex:
+            futs = {ex.submit(_infer, (i, p)): i for i, p in enumerate(profiles)}
+            done = 0
+            for fut in as_completed(futs):
+                idx, r = fut.result()
+                preds[idx] = r["prediction"]
+                confs[idx] = r["confidence"]
+                reasons[idx] = r["reasoning"]
+                done += 1
+                if done % 50 == 0 or done == len(profiles):
+                    print(f"  {done}/{len(profiles)} done")
 
         return {
-            "predictions": predictions,
+            "predictions": preds,
             "true_labels": true_labels,
-            "confidences": confidences,
-            "reasonings": reasonings,
+            "confidences": confs,
+            "reasonings": reasons,
             "strategy": strategy.value,
-            "model": self.inference_engine.model_name,
-            "prediction_horizon": prediction_horizon
+            "model": self.model_name,
+            "prediction_horizon": prediction_horizon,
         }
 
+    def evaluate_from_files(
+        self,
+        profile_dir: str,
+        gt_dict: Dict[int, int],
+        strategy: InferenceStrategy = InferenceStrategy.ZERO_SHOT,
+        prediction_horizon: int = 1,
+        max_samples: Optional[int] = None,
+    ) -> Dict[str, any]:
+        """
+        Evaluate profiles stored as individual .txt files (ELSA/HRS/SHARE format).
+        Filename stem must be the integer patient ID.
+        """
+        from pathlib import Path
 
-# Example usage
-if __name__ == "__main__":
-    # Example: Create a sample profile
-    sample_profile = TemporalSymptomProfile(
-        participant_id="SUBJ_001",
-        age_at_assessments=[65, 67, 69, 71],
-        cognitive_features=[
-            {"word_recall_immediate": 8, "word_recall_delayed": 6, "orientation": 5},
-            {"word_recall_immediate": 7, "word_recall_delayed": 5, "orientation": 5},
-            {"word_recall_immediate": 5, "word_recall_delayed": 3, "orientation": 4},
-            {"word_recall_immediate": 4, "word_recall_delayed": 2, "orientation": 3}
-        ],
-        functional_features=[
-            {"ADL_impairment": 0, "IADL_impairment": 0},
-            {"ADL_impairment": 0, "IADL_impairment": 1},
-            {"ADL_impairment": 1, "IADL_impairment": 2},
-            {"ADL_impairment": 2, "IADL_impairment": 3}
-        ],
-        physiological_features=[
-            {"BMI": 25.3, "grip_strength": 32, "gait_speed": 1.2},
-            {"BMI": 24.8, "grip_strength": 30, "gait_speed": 1.1},
-            {"BMI": 24.2, "grip_strength": 28, "gait_speed": 1.0},
-            {"BMI": 23.5, "grip_strength": 25, "gait_speed": 0.9}
-        ],
-        neuropsychiatric_features=[
-            {"depression_score": 2, "anxiety": "low"},
-            {"depression_score": 3, "anxiety": "low"},
-            {"depression_score": 5, "anxiety": "moderate"},
-            {"depression_score": 6, "anxiety": "moderate"}
-        ],
-        demographics={"age": 65, "sex": "Female", "education": "12 years"}
-    )
+        files = sorted(Path(profile_dir).glob("*.txt"))
+        if max_samples:
+            files = files[:max_samples]
 
-    # Initialize inference engine
-    inference = LLMInference(model_name="gpt-4o")
+        def _process(f):
+            pid = int(f.stem)
+            if pid not in gt_dict:
+                return None
+            engine = LLMInference(self.model_name, **self._engine_kwargs)
+            text = f.read_text(encoding="utf-8")
+            r = engine.predict_from_text(text, strategy, prediction_horizon)
+            return pid, r["prediction"], gt_dict[pid], r["raw_response"]
 
-    # Test zero-shot inference
-    result_zeroshot = inference.predict(
-        profile=sample_profile,
-        strategy=InferenceStrategy.ZERO_SHOT,
-        prediction_horizon=2
-    )
-    print("Zero-shot prediction:", result_zeroshot["prediction"])
+        predictions, actuals, ids, responses = [], [], [], []
 
-    # Test few-shot inference (with mock examples)
-    few_shot_examples = [
-        (sample_profile, True),  # This would be replaced with actual examples
-    ]
-    result_fewshot = inference.predict(
-        profile=sample_profile,
-        strategy=InferenceStrategy.FEW_SHOT,
-        prediction_horizon=2,
-        few_shot_examples=few_shot_examples
-    )
-    print("Few-shot prediction:", result_fewshot["prediction"])
+        with ThreadPoolExecutor(max_workers=self.max_workers) as ex:
+            futs = [ex.submit(_process, f) for f in files]
+            done = 0
+            for fut in as_completed(futs):
+                r = fut.result()
+                if r is None:
+                    continue
+                pid, pred, label, raw = r
+                if pred is None:
+                    continue
+                predictions.append(int(pred))
+                actuals.append(int(label))
+                ids.append(pid)
+                responses.append(raw)
+                done += 1
+                if done % 50 == 0:
+                    print(f"  {done} profiles processed")
+
+        print(f"Done. Valid samples: {len(predictions)}")
+        return {
+            "predictions": predictions,
+            "true_labels": actuals,
+            "patient_ids": ids,
+            "raw_responses": responses,
+            "strategy": strategy.value,
+            "model": self.model_name,
+            "prediction_horizon": prediction_horizon,
+        }
